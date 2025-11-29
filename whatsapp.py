@@ -1,22 +1,24 @@
 import os
 import sqlite3
+import json
 import requests
 from datetime import datetime
-from flask import Blueprint, render_template, request, jsonify, current_app
+from flask import Blueprint, request, jsonify, send_from_directory, current_app
 
-whatsapp_bp = Blueprint('whatsapp_bp', __name__, template_folder='templates')
-
+# CONFIG
 DB_PATH = "complaints.db"
-
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN")
 WHATSAPP_PHONE_NUMBER_ID = os.environ.get("WHATSAPP_PHONE_NUMBER_ID")
 WHATSAPP_API_URL = "https://graph.facebook.com/v17.0"
 
+# Blueprint
+whatsapp_bp = Blueprint("whatsapp_bp", __name__)
 
-# -----------------------------
-# INIT TABLE
-# -----------------------------
-def init_table():
+
+# --------------------------
+# DB Setup
+# --------------------------
+def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("""
@@ -35,21 +37,21 @@ def init_table():
 
 @whatsapp_bp.before_app_first_request
 def setup():
-    init_table()
+    init_db()
 
 
-# -----------------------------
-# SEND TEMPLATE MESSAGE
-# -----------------------------
-def send_whatsapp_template(mobile, template_name, components=None):
+# --------------------------
+# Send Template Function
+# --------------------------
+def send_whatsapp_template(mobile, template_name, components):
     if not WHATSAPP_TOKEN or not WHATSAPP_PHONE_NUMBER_ID:
-        return {"error": "Missing WhatsApp credentials"}
+        return {"error": "Missing env variables"}
 
     url = f"{WHATSAPP_API_URL}/{WHATSAPP_PHONE_NUMBER_ID}/messages"
 
     headers = {
         "Authorization": f"Bearer {WHATSAPP_TOKEN}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
     }
 
     payload = {
@@ -59,11 +61,9 @@ def send_whatsapp_template(mobile, template_name, components=None):
         "template": {
             "name": template_name,
             "language": {"code": "en_US"},
+            "components": components
         }
     }
-
-    if components:
-        payload["template"]["components"] = components
 
     try:
         r = requests.post(url, json=payload, headers=headers)
@@ -72,19 +72,25 @@ def send_whatsapp_template(mobile, template_name, components=None):
         return {"error": str(e)}
 
 
-# -----------------------------
-# WEBHOOK RECEIVER
-# -----------------------------
+# --------------------------
+# INDEX PAGE (No templates folder)
+# --------------------------
+@whatsapp_bp.route("/")
+def index():
+    return send_from_directory(".", "index.html")
+
+
+# --------------------------
+# WHATSAPP WEBHOOK
+# --------------------------
 @whatsapp_bp.route("/webhook", methods=["GET", "POST"])
 def webhook():
-    # Verification
     if request.method == "GET":
         return request.args.get("hub.challenge", ""), 200
 
-    # Incoming message
     data = request.get_json(silent=True)
     if not data:
-        return jsonify({"error": "no data"}), 400
+        return jsonify({"error": "empty"}), 400
 
     try:
         for entry in data.get("entry", []):
@@ -94,10 +100,10 @@ def webhook():
                 messages = value.get("messages", [])
 
                 if contacts and messages:
-                    mobile = contacts[0]["wa_id"]
                     name = contacts[0].get("profile", {}).get("name", "Unknown")
-                    msg = messages[0]["text"]["body"]
-                    ts = messages[0].get("timestamp")
+                    mobile = contacts[0]["wa_id"]
+                    msg = messages[0].get("text", {}).get("body", "")
+                    ts = messages[0]["timestamp"]
                     created = datetime.fromtimestamp(int(ts)).strftime("%Y-%m-%d %H:%M:%S")
 
                     conn = sqlite3.connect(DB_PATH)
@@ -105,43 +111,37 @@ def webhook():
                     c.execute("""
                         INSERT INTO whatsapp_incoming (name, mobile, message, created_at, raw_json)
                         VALUES (?, ?, ?, ?, ?)
-                    """, (name, mobile, msg, created, str(value)))
+                    """, (name, mobile, msg, created, json.dumps(value)))
                     conn.commit()
                     conn.close()
 
-        return jsonify({"status": "received"}), 200
-
+        return jsonify({"status": "ok"}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
-# -----------------------------
-# API: RETURN ALL RECEIVED WEBHOOKS
-# -----------------------------
+# --------------------------
+# FETCH WEBHOOK DATA
+# --------------------------
 @whatsapp_bp.route("/api/webhooks")
 def get_webhooks():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
-    c.execute("SELECT * FROM whatsapp_incoming ORDER BY id DESC LIMIT 300")
+    c.execute("SELECT * FROM whatsapp_incoming ORDER BY id DESC LIMIT 200")
     rows = c.fetchall()
     conn.close()
-
     return jsonify([dict(r) for r in rows])
 
 
-# -----------------------------
-# API: SEND TEMPLATE
-# -----------------------------
+# --------------------------
+# SEND TEMPLATE API
+# --------------------------
 @whatsapp_bp.route("/api/send-template", methods=["POST"])
-def api_send_template():
+def send_temp():
     data = request.get_json(silent=True) or {}
-
     record_id = data.get("id")
     template = data.get("template", "complaint_received")
-
-    if not record_id:
-        return jsonify({"error": "missing id"}), 400
 
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -150,20 +150,16 @@ def api_send_template():
     conn.close()
 
     if not row:
-        return jsonify({"error": "id not found"}), 404
+        return jsonify({"error": "invalid id"}), 404
 
     mobile, name = row
 
     components = [
-        {
-            "type": "body",
-            "parameters": [
-                {"type": "text", "text": name},
-                {"type": "text", "text": str(record_id)}
-            ]
-        }
+        {"type": "body", "parameters": [
+            {"type": "text", "text": name},
+            {"type": "text", "text": str(record_id)}
+        ]}
     ]
 
-    return jsonify(
-        send_whatsapp_template(mobile, template, components)
-    )
+    res = send_whatsapp_template(mobile, template, components)
+    return jsonify(res)
