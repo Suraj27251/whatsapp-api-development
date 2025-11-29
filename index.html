@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>WhatsApp Inbox</title>
+  <style>
+    body { font-family: Arial; padding: 20px; }
+    .card { border: 1px solid #ccc; padding: 12px; margin: 10px 0; border-radius: 6px; }
+    .meta { font-size: 0.9em; color: #666; }
+    button { padding: 8px 12px; border: none; background: #007bff; color: white; border-radius: 5px; cursor: pointer; }
+  </style>
+</head>
+<body>
+
+<h2>Incoming WhatsApp Messages</h2>
+<div id="messages">Loading...</div>
+
+<script>
+async function load() {
+  const res = await fetch("/whatsapp/api/webhooks");
+  const data = await res.json();
+
+  const box = document.getElementById("messages");
+  box.innerHTML = "";
+
+  data.forEach(item => {
+    const el = document.createElement("div");
+    el.className = "card";
+
+    el.innerHTML = `
+      <strong>${item.name}</strong> (${item.mobile})<br>
+      <div class="meta">ID: ${item.id} | ${item.created_at}</div>
+      <p>${item.message}</p>
+      <button onclick="sendTemp(${item.id}, this)">Send Template</button>
+    `;
+
+    box.appendChild(el);
+  });
+}
+
+async function sendTemp(id, btn) {
+  btn.innerText = "Sending...";
+  btn.disabled = true;
+
+  const res = await fetch("/whatsapp/api/send-template", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({id})
+  });
+
+  btn.innerText = res.ok ? "Sent!" : "Error";
+  setTimeout(() => (btn.innerText = "Send Template", btn.disabled = false), 1500);
+}
+
+load();
+setInterval(load, 5000);
+</script>
+
+</body>
+</html>
