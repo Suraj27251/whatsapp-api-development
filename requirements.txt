@@ -1,0 +1,9 @@
+Flask
+gunicorn
+requests
+numpy
+scikit-learn
+scipy
+threadpoolctl
+joblib
+python-dotenv
